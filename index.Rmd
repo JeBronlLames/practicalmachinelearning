@@ -1,0 +1,163 @@
+---
+title: "PML - Predicting Exercise Classification"
+author: "Cody Hollohan"
+date: "4/5/2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE)
+```
+
+# Background
+The purpose of this assignment is to have the student gain experience producing a classification model using their tool of choice. The [training](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv) and [testing](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv) data to be used to train the model, and ultimately evaluate it, are generously provided by the contributors at http://groupware.les.inf.puc-rio.br/har. 
+
+This report elaborates on raw data manipulation prior to model selection, the model design, model validation, out of sample error considerations, model accuracy, and final results on the testing dataset.
+
+# Partitioning Data into Training & Validation Subsets
+
+Before any data manipulation, other than setting missing data to `NA`, we partition the training data into a 67% subset for training our model, and a 33% subset for validation. The testing dataset will only be used to evaluate the model as our final test for accuracy.
+
+```{r loadPackagesData, message=FALSE}
+# load packages
+library(caret)
+library(randomForest)
+library(dplyr)
+
+# Load data from url
+train_raw <- data.frame(read.csv("http://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv",
+                                 na.strings = c("", "#DIV/0!")))
+
+test_raw <- data.frame(read.csv("http://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv",
+                                na.strings = c("", "#DIV/0!")))
+
+# Index for training and validation set
+tr_index <- createDataPartition(train_raw$classe, p = 0.667, list = FALSE) 
+
+# Split training data into "train_spl" & "validation_spl"
+training_init <- train_raw[tr_index,-(1:7)]
+validation_init <- train_raw[-tr_index,-(1:7)] # Leave for later...
+```
+
+# Raw Data Manipulation
+
+Here, the strategy is to wittle down the amount of information fed into the model such that redundancy of computational operations and of correlated variables is minimized, an appropriate balance between bias and variance is produced, and only variables containing measurements on the data are included.
+
+It is important to note that our selection of arguments to include in the `read.csv`function, such as `na.strings` or `stringsAsFactors`, affect the proceeding decisions making process. Consider if the that the string `c("","#DIV/0!")` is included in the argument `na.strings`, where we run into complications dealing with factor variables created of character variables, which actually contain numeric information. Here, the `NA` values within the factor variable columns are not detected by functions like `is.na`, which makes eliminating them a more manual process. Otherwise, however, if we set `stringsAsFactors = FALSE`, then the majority of this would-be factor data is coerced to `NA` as a result, and we don't even get to take a look at what it may have contained.
+
+The consequences of either choice are relatively irrelevant in this case, where the variation of the the observations of the specific variables in question is relatively low, making them likely candidates for removal prior to training the model, and the alternative results in the majority of the data of that variable to be coerced to `NA`, making it an equally likely candidate for removal prior to model training. The lesson here is that great care is to be taken when exploring datasets for their formatting nuances prior to (potentially shortsightedly) ruling out subsets of data.
+
+```{r Explore}
+# Explore Training Data
+dim(training_init)
+str(training_init)
+```
+
+We here remove `NA` data by considering both the factor variable `NA` data with basic logical expressions, as well as all of `NA` data with the `is.na` function. Some folks ran calculations on "near zero variation", though this is unecessarily complicating the analysis, when in reality, only the missing or `NA` data is being removed (because of its lack of variance), though at the potential expense of computational demand.
+
+Specifically, we remove variables having more than 90% `NA` data, though, strictly speaking, the data removed contained at least 93% `NA` values.
+
+Note: All transformations performed on the training dataset are also performed on the validation dataset, such that our estimate of error is not affected some inconsistency between the two subsets of the raw "training" file.
+
+```{r removeNA}
+# Check for NA data
+NA_vec <- sapply(training_init, function(i) sum(i == "NA" | is.na(i))/length(i) < 0.9)
+NA_vec_val <- sapply(validation_init, function(j) sum(j == "NA" | is.na(j))/length(j) < 0.9)
+# Subset on non-NA data
+training <- training_init[,NA_vec]
+validation <- validation_init[,NA_vec_val]
+
+dim(training)
+```
+
+# Training Our Model With Cross-Validation Using The 'Training' Dataset and Random Forests
+
+We choose random forests for its robust classification capabilities, and embedded cross validation functionality. For the sake of education, we test out three different settings on parameters for the cross validation folds and iterative repeated cross validation cycles. In the first model we use the fewest number of folds with the `'cv'` method, set at 2.. In the second, we simply use the default settings in the computational nuances of the `train` function with the `'cv'` method. For the third, we use the `'repeatedcv'` method with 5 folds, for 5 iterations.
+
+An overall seed is set to establish reproducibility in our methods, as well as between each of the 3 trial models that we are pitting against one another.
+
+Out of curiosity, we explore the relative importance of each variable, such that the degree to which they contribute to classifying our target variable is quantified and ranked against the contributions of the other predictors.
+
+```{r randomforest1}
+# Traing model with 'randomForest' - 2 folds for cross validation
+set.seed(2017)
+control.fewer <- trainControl(method = 'cv', number = 2, verboseIter = FALSE)
+mod.fewer <- train(classe ~ ., method = 'rf', data = training, trControl = control.fewer)
+# Evaluate relative importance of each variable on classification of target variable
+vimp.fewer <- varImp(mod.fewer)
+plot(vimp.fewer, main = "Importance of Variables", top = 15)
+# Make prediction of classification
+pred.fewer <- predict(mod.fewer, newdata = validation)
+# Evaluate performance of model
+confusionMatrix(validation$classe, pred.fewer)
+```
+
+```{r randomforest2}
+# Train model with 'randomForest' - default cross validation settings
+set.seed(2017)
+control <- trainControl(method = 'cv', verboseIter = FALSE)
+mod <- train(classe ~ ., method = 'rf', data = training, trControl = control)
+# Evaluate relative importance of each variable on classification of target variable
+vimp <- varImp(mod)
+plot(vimp, main = "Importance of Variables", top = 15)
+# Make prediction of classification
+pred <- predict(mod, newdata = validation)
+# Evaluate performance of model
+confusionMatrix(validation$classe, pred)
+```
+
+```{r randomforest3}
+# Train model with 'randomForest' - method = 'repeatedcv' - 5 folds - 5 iterations
+set.seed(2017)
+control.repeat <- trainControl(method = "repeatedcv", number = 5, verboseIter = FALSE)
+mod.repeat <- train(classe ~ ., method = "rf", data = training, trControl = control.repeat)
+# Evaluate relative importance of each variable on classification of target variable
+vimp.repeat <- varImp(mod.repeat)
+plot(vimp.repeat, main = "Importance of Variables", top = 15)
+# Make prediction of classification
+pred.repeat <- predict(mod.repeat, newdata = validation)
+# Evaluate performance of model
+confusionMatrix(validation$classe, pred.repeat)
+```
+
+Nothing much noteworthy at first glance from the three separate relative importance plots for our three cross validation trials, although it is somewhat interesting that the top 15 classifiers do not match from model to model. Attributed to the random nature of the voting infrastructure in random forests? However, on this seed, we see that introducing additional complexity not only brings along more time consuming computation, but a negligible difference in performance in terms of accuracy. 
+
+Lastly, from a practical standpoint on future experimental design, it looks as though the majority of the classification accuracy comes from the data gathered on the belt instrument, with secondary importance on the forearm instrument. This suggests that a considerably more parsimonious approach at detecting which motion is being executed, and whether or not the exercise is being executed properly, could be to wittle down instrumentation to these two sensors, among chosen others, where the majority of the prediction can be achieved by the instruments mounted to the subjects' waist and forearm.
+
+
+# Model Selection
+
+We choose to proceed with our 2-folds model, which is the least complex, also the least likely to be overfit, considering the negligible change in accuracy with respect to the introduction of redundancy and iterative repetition. From the confusion matrix we see 99.28% accuracy on our validation dataset. This suggests an estimated out of sample error of 0.72%.
+
+# Final Model Prediction On Small Test Dataset
+
+Let's see how the model performs on our relatively small testing dataset, which has 20 observations. First, however, it is imperative that we perform the same data transformations on this dataset that we performed on our training and validation sets.
+
+```{r testing}
+# Transform testing data
+testtemp <- test_raw[,-(1:7)]
+NA_vec_test <- sapply(testtemp, function(k) sum(k == "NA" | is.na(k))/length(k) < 0.9)
+testing <- testtemp[,NA_vec_test]
+# Predict test dataset classe variable
+pred.test <- predict(mod.fewer, newdata = testing)
+# Evaluate performance of model
+data.frame(Quiz = testing$problem_id, Solution = pred.test)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+***
+***
+***
+***
+***
+***
